@@ -1,0 +1,17 @@
+{
+  "name": "InfiWindow",
+  "slug": "infiwindow",
+  "identifier": "com.infinity4b.infiwindow",
+  "version": "0.1.0",
+  "copyright": "© 2026 Infinity4B",
+  "out": "build",
+  "macos": {
+    "minimumSystemVersion": "12.0",
+    "infoPlist": {
+      "LSUIElement": true
+    }
+  },
+  "linux": {
+    "webview": false
+  }
+}
