@@ -39,6 +39,25 @@
 
 不同网络和画质下流量差别很大。可以先连一次，对照窗口里的流量图，在“会话检测参数”里调整阈值。被监视的进程名前缀也能改，理论上同样适用于其他远程桌面软件。
 
+## 下载
+
+在 [Releases](https://github.com/Infinity4B/infiwindow/releases) 中按芯片选择：`macOS-arm64`（Apple 芯片）、`macOS-amd64`（Intel）或 `macOS-universal`（两者通用）。每次推送到 main 的构建产物也可以在 [Actions](https://github.com/Infinity4B/infiwindow/actions) 的运行记录里下载。
+
+应用是 ad-hoc 签名的。首次打开如果被拦截，请在“系统设置 → 隐私与安全性”中点“仍要打开”，或者执行：
+
+```sh
+xattr -dr com.apple.quarantine /Applications/InfiWindow.app
+```
+
+## 发布
+
+`.github/workflows/build.yml` 会在每次推送和 PR 时运行检查和测试，并构建三个版本的 macOS 应用。推送 `v*` 标签时还会自动发布 Release。标签必须和 `mygo.json` 里的 `version` 一致：
+
+```sh
+# 先把 mygo.json 的 version 改成 0.2.0 并提交
+git tag v0.2.0 && git push origin v0.2.0
+```
+
 ## 构建
 
 需要 Go 1.27+（MyGo 的命令行工具已作为 Go tool 写进 `go.mod`）。
