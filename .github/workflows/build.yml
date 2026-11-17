@@ -6,6 +6,12 @@
 # - Tags v*: also published as a GitHub release. The tag must match "version"
 #   in mygo.json, e.g. bump it to 0.2.0, commit, then
 #     git tag v0.2.0 && git push origin v0.2.0
+#
+# Hosted macOS runners are scarce: jobs that wait too long for one are
+# cancelled ("The job was not acquired by Runner of type hosted"). So tests
+# and all three builds share a single macOS job, and each run asks for only
+# one macOS runner. Disk images need hdiutil, so the builds cannot move to
+# Linux.
 name: Build
 
 on:
@@ -27,9 +33,10 @@ env:
   CGO_ENABLED: "0"
 
 jobs:
-  test:
-    name: Test
+  build:
+    name: Test and build (macOS)
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -56,40 +63,34 @@ jobs:
           go vet -tags manual ./...
       - name: go test
         run: go test ./...
-
-  build:
-    name: macOS ${{ matrix.arch }}
-    needs: test
-    runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { arch: arm64, label: "Apple silicon" }
-          - { arch: amd64, label: "Intel" }
-          - { arch: universal, label: "Universal" }
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-      - name: Build InfiWindow.app and the disk image
-        run: go tool mygo build -platform "darwin/${{ matrix.arch }}"
+      - name: Build InfiWindow.app and the disk images
+        run: go tool mygo build -platform darwin/arm64,darwin/amd64,darwin/universal
       - name: Name the artifacts
-        id: files
         run: |
           version="$(jq -r .version mygo.json)"
-          dir="build/darwin-${{ matrix.arch }}"
-          mkdir -p dist
-          # mygo names the universal image without an arch; name all three
-          # alike so the release lists them clearly.
-          cp "$dir"/*.dmg "dist/InfiWindow-$version-macOS-${{ matrix.arch }}.dmg"
-          ditto -c -k --keepParent "$dir/InfiWindow.app" "dist/InfiWindow-$version-macOS-${{ matrix.arch }}.zip"
-          ls -lh dist
+          for arch in arm64 amd64 universal; do
+            dir="build/darwin-$arch"
+            mkdir -p "dist/$arch"
+            # mygo names the universal image without an arch; name all three
+            # alike so the release lists them clearly.
+            cp "$dir"/*.dmg "dist/$arch/InfiWindow-$version-macOS-$arch.dmg"
+            ditto -c -k --keepParent "$dir/InfiWindow.app" "dist/$arch/InfiWindow-$version-macOS-$arch.zip"
+          done
+          ls -lhR dist
       - uses: actions/upload-artifact@v7
         with:
-          name: InfiWindow-macOS-${{ matrix.arch }}
-          path: dist/*
+          name: InfiWindow-macOS-arm64
+          path: dist/arm64/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: InfiWindow-macOS-amd64
+          path: dist/amd64/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: InfiWindow-macOS-universal
+          path: dist/universal/*
           if-no-files-found: error
 
   release:
@@ -97,6 +98,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
