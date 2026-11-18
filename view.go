@@ -233,7 +233,7 @@ func (a *app) trafficCard(c *ui.Context) {
 			Draw(func(pt *ui.Painter, r ui.Rect) {
 				drawChart(pt, r, history, p, t)
 			})
-		ui.Text(c, "上行持续高于“开始阈值”即判定为远程会话；之后低于“保持阈值”一段时间判定为断开（纵轴为平方根刻度）。").
+		ui.Text(c, "上行持续高于“开始阈值”即判定为远程会话；之后“断开等待”时间内的平均上行低于“保持阈值”判定为断开（纵轴为平方根刻度）。").
 			FontSize(11).TextColor(t.TextMuted).Wrap()
 	})
 }

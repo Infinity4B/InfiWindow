@@ -52,6 +52,7 @@ var (
 	cgModePixelWidth     func(mode uintptr) uint
 	cgModePixelHeight    func(mode uintptr) uint
 	cgModeRefresh        func(mode uintptr) float64
+	cgModeIOID           func(mode uintptr) int32
 	cgBeginConfig        func(cfg *uintptr) int32
 	cgConfigureMode      func(cfg uintptr, display uint32, mode uintptr, opts uintptr) int32
 	cgConfigureMirror    func(cfg uintptr, display uint32, master uint32) int32
@@ -126,6 +127,7 @@ func load() error {
 		purego.RegisterLibFunc(&cgModePixelWidth, cg, "CGDisplayModeGetPixelWidth")
 		purego.RegisterLibFunc(&cgModePixelHeight, cg, "CGDisplayModeGetPixelHeight")
 		purego.RegisterLibFunc(&cgModeRefresh, cg, "CGDisplayModeGetRefreshRate")
+		purego.RegisterLibFunc(&cgModeIOID, cg, "CGDisplayModeGetIODisplayModeID")
 		purego.RegisterLibFunc(&cgBeginConfig, cg, "CGBeginDisplayConfiguration")
 		purego.RegisterLibFunc(&cgConfigureMode, cg, "CGConfigureDisplayWithDisplayMode")
 		purego.RegisterLibFunc(&cgConfigureMirror, cg, "CGConfigureDisplayMirrorOfDisplay")
@@ -197,6 +199,33 @@ type Manager struct {
 	layout  Layout
 	// prevMain is the main display before LayoutMain moved it.
 	prevMain uint32
+	// saved are the modes the other displays had before the virtual one
+	// came: mirroring switches them to a mode that fits the iPad, and when
+	// it ends macOS picks one by itself, often another resolution or a
+	// fixed 47.95 Hz instead of ProMotion.
+	saved []savedMode
+}
+
+// savedMode is a display mode remembered for restoring.
+type savedMode struct {
+	display uint32
+	mode    uintptr // retained CGDisplayModeRef
+	key     modeKey
+}
+
+type modeKey struct {
+	ioID           int32
+	w, h, pw, ph   int
+	refreshMilliHz int
+}
+
+func keyOf(md uintptr) modeKey {
+	return modeKey{
+		ioID: cgModeIOID(md),
+		w:    int(cgModeWidth(md)), h: int(cgModeHeight(md)),
+		pw: int(cgModePixelWidth(md)), ph: int(cgModePixelHeight(md)),
+		refreshMilliHz: int(math.Round(cgModeRefresh(md) * 1000)),
+	}
 }
 
 func NewManager() *Manager { return &Manager{} }
@@ -228,13 +257,19 @@ func (m *Manager) Create(spec device.Spec, layout Layout) (uint32, error) {
 		id  uint32
 		err error
 	)
-	withPool(func() { id, err = m.createLocked(spec) })
+	withPool(func() {
+		m.saveModes()
+		id, err = m.createLocked(spec)
+		if err != nil {
+			m.releaseSaved()
+		}
+	})
 	if err != nil {
 		return 0, err
 	}
 
 	if !selectMode(id, spec.Selected, spec.RefreshHz, 3*time.Second) {
-		m.destroyLocked(false)
+		m.destroyLocked(true)
 		return 0, fmt.Errorf("系统未提供 %d×%d 的显示模式", spec.Selected.Width, spec.Selected.Height)
 	}
 	m.layout = layout
@@ -474,14 +509,116 @@ func (m *Manager) destroyLocked(wait bool) {
 	if m.display == 0 {
 		return
 	}
+	id := m.id
+	var relaid bool
 	withPool(func() {
-		if m.restoreLayout() && wait {
+		relaid = m.restoreLayout()
+		if relaid && wait {
 			m.waitSettled(1500 * time.Millisecond)
 		}
 		// Releasing the CGVirtualDisplay removes the monitor right away.
 		m.display.Send(selRelease)
 	})
 	m.display, m.id = 0, 0
+	m.restoreModes(id, relaid, wait)
+}
+
+// saveModes remembers the current mode of every online display.
+func (m *Manager) saveModes() {
+	m.releaseSaved()
+	for _, d := range onlineDisplays() {
+		if md := cgCopyMode(d); md != 0 {
+			m.saved = append(m.saved, savedMode{display: d, mode: md, key: keyOf(md)})
+		}
+	}
+}
+
+func (m *Manager) releaseSaved() {
+	for _, s := range m.saved {
+		cgModeRelease(s.mode)
+	}
+	m.saved = nil
+}
+
+// restoreModes puts the saved modes back once the virtual display vid is
+// gone. macOS reconfigures the displays itself when the mirror set breaks up
+// and when the virtual display disappears, so with wait it checks again
+// after a moment and reapplies whatever was changed back. relaid says the
+// mirroring or main display was undone: then the first pass sets every saved
+// mode without comparing, since the current mode this process sees may not
+// have caught up yet.
+func (m *Manager) restoreModes(vid uint32, relaid, wait bool) {
+	if len(m.saved) == 0 {
+		return
+	}
+	defer m.releaseSaved()
+	if !wait {
+		withPool(func() { m.applySavedModes(relaid) })
+		return
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for vid != 0 && cgIsOnline(vid) != 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		time.Sleep(300 * time.Millisecond)
+		var pending bool
+		force := relaid && attempt == 0
+		withPool(func() { pending = m.applySavedModes(force) })
+		if !pending {
+			return
+		}
+	}
+}
+
+// applySavedModes switches every display not in its saved mode back to it
+// (every display when force) and reports whether any needed switching.
+func (m *Manager) applySavedModes(force bool) bool {
+	var cfg uintptr
+	if cgBeginConfig(&cfg) != 0 {
+		return true
+	}
+	changed := false
+	for _, s := range m.saved {
+		if cgIsOnline(s.display) == 0 {
+			continue
+		}
+		cur := cgCopyMode(s.display)
+		if cur == 0 {
+			continue
+		}
+		same := keyOf(cur) == s.key
+		cgModeRelease(cur)
+		if same && !force {
+			continue
+		}
+		// Prefer the display's own mode object (it may have been rebuilt
+		// since); the saved reference is the fallback.
+		md := s.mode
+		yes := objc.ID(clsNSNumber).Send(sel("numberWithBool:"), true)
+		opts := objc.ID(clsNSDictionary).Send(sel("dictionaryWithObject:forKey:"), yes, objc.ID(kShowDuplicateLowRes))
+		all := cgCopyAllModes(s.display, uintptr(opts))
+		if all != 0 {
+			for i := range cfArrayGetCount(all) {
+				if c := cfArrayGetValueAt(all, i); keyOf(c) == s.key {
+					md = c
+					break
+				}
+			}
+		}
+		if cgConfigureMode(cfg, s.display, md, 0) == 0 {
+			changed = true
+		}
+		if all != 0 {
+			defer cfRelease(all)
+		}
+	}
+	if !changed {
+		cgCancelConfig(cfg)
+		return false
+	}
+	cgCompleteConfig(cfg, configureForSession)
+	return true
 }
 
 // ListDisplays returns every online display.

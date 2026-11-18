@@ -2,6 +2,12 @@
 
 // Run with: CGO_ENABLED=0 go test -tags manual -run Manual -v ./internal/vdisplay
 // It briefly adds a real virtual display to this Mac.
+//
+// A process without AppKit that queried the displays before creating one
+// never sees the new display's modes, and Create now records the other
+// displays' modes first, so this test fails with "系统未提供 … 的显示模式".
+// Check the real app instead: InfiWindow --create / --remove, and list the
+// displays from another process with -run ManualList.
 package vdisplay
 
 import (

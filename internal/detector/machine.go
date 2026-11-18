@@ -4,9 +4,11 @@
 // UU Remote has no public API or session event, so the detector watches what
 // a session cannot hide: while someone is viewing the screen, the UURemote
 // processes upload a video stream. A sustained upload rate above
-// Params.ConnectKBps means a session started; when the upload stays below
-// Params.HoldKBps (and no extra peer connections remain open) for
-// Params.DisconnectSeconds, it ended. Upload, not download, is measured, so
+// Params.ConnectKBps means a session started; when the average upload over
+// the last Params.DisconnectSeconds falls below Params.HoldKBps (and no extra
+// peer connections remain open), it ended. Averaging matters: an idle UU
+// Remote still sends short bursts of 10-20 KB/s every so often, and letting
+// each one restart the countdown could hold a finished session forever. Upload, not download, is measured, so
 // using this Mac to control another device does not count as a session.
 package detector
 
@@ -53,9 +55,17 @@ type Machine struct {
 	connected  bool
 	aboveSince time.Time
 	lastActive time.Time
+	// recent holds the upload samples of the last DisconnectSeconds while
+	// connected.
+	recent []rateAt
 	// baseline is the number of peer connections seen while idle; more
 	// than that during a session counts as activity. -1 = unknown.
 	baseline int
+}
+
+type rateAt struct {
+	at   time.Time
+	kbps float64
 }
 
 // NewMachine returns a disconnected machine.
@@ -83,6 +93,7 @@ func (m *Machine) Step(now time.Time, uploadKBps float64, conns int) bool {
 				m.connected = true
 				m.lastActive = now
 				m.aboveSince = time.Time{}
+				m.recent = m.recent[:0]
 				return true
 			}
 			return false
@@ -94,19 +105,33 @@ func (m *Machine) Step(now time.Time, uploadKBps float64, conns int) bool {
 		return false
 	}
 
-	active := uploadKBps >= m.p.HoldKBps
-	if conns >= 0 && m.baseline >= 0 && conns > m.baseline {
-		active = true
+	window := time.Duration(m.p.DisconnectSeconds) * time.Second
+	m.recent = append(m.recent, rateAt{now, uploadKBps})
+	drop := 0
+	for drop < len(m.recent) && now.Sub(m.recent[drop].at) >= window {
+		drop++
 	}
-	if active {
+	m.recent = append(m.recent[:0], m.recent[drop:]...)
+
+	if conns >= 0 && m.baseline >= 0 && conns > m.baseline {
 		m.lastActive = now
 		return false
 	}
-	if now.Sub(m.lastActive) >= time.Duration(m.p.DisconnectSeconds)*time.Second {
-		m.connected = false
-		return true
+	// Judge only a full window, counted from the connect or the last
+	// extra peer connection.
+	if now.Sub(m.lastActive) < window {
+		return false
 	}
-	return false
+	sum := 0.0
+	for _, r := range m.recent {
+		sum += r.kbps
+	}
+	if sum/float64(len(m.recent)) >= m.p.HoldKBps {
+		return false
+	}
+	m.connected = false
+	m.recent = m.recent[:0]
+	return true
 }
 
 // Force sets the state, e.g. when the user overrides detection.
@@ -114,4 +139,5 @@ func (m *Machine) Force(connected bool, now time.Time) {
 	m.connected = connected
 	m.lastActive = now
 	m.aboveSince = time.Time{}
+	m.recent = m.recent[:0]
 }

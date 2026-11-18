@@ -38,10 +38,33 @@ func TestDisconnectAfterQuietPeriod(t *testing.T) {
 	if ch := feed(m, t0.Add(time.Second), []float64{8, 7, 9, 6, 8, 7, 8, 9}, -1); len(ch) != 0 {
 		t.Fatalf("idle stream dropped: %v", ch)
 	}
-	// The last active sample was at t0+8s, so the session ends at t0+13s.
+	// The 5-second average drops below 5 KB/s at t0+11s (8+9+1+1+1).
 	ch := feed(m, t0.Add(9*time.Second), []float64{1, 1, 1, 1, 1, 1, 1}, -1)
-	if len(ch) != 1 || ch[0] != 4 || m.Connected() {
-		t.Fatalf("expected disconnect after 5s, got %v", ch)
+	if len(ch) != 1 || ch[0] != 2 || m.Connected() {
+		t.Fatalf("expected disconnect at t0+11s, got %v", ch)
+	}
+}
+
+func TestIdleBurstsDoNotHoldSession(t *testing.T) {
+	m := NewMachine(Params{ConnectKBps: 120, ConnectSeconds: 1, HoldKBps: 6, DisconnectSeconds: 25})
+	t0 := time.Unix(0, 0)
+	feed(m, t0, []float64{300}, 2)
+	// After the remote side leaves, UU Remote keeps sending a short burst
+	// every ~15s (measured: 10-19 KB/s for a second, ~0 otherwise).
+	idle := make([]float64, 60)
+	for i := range idle {
+		if i%15 == 7 {
+			idle[i] = 19
+		} else if i%15 == 8 {
+			idle[i] = 4
+		}
+	}
+	ch := feed(m, t0.Add(time.Second), idle, 2)
+	if len(ch) != 1 || m.Connected() {
+		t.Fatalf("bursts held the session: %v", ch)
+	}
+	if ch[0] != 24 { // a full 25s window after the connect at t0
+		t.Fatalf("expected disconnect at t0+25s, got sample %d", ch[0])
 	}
 }
 

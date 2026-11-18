@@ -30,12 +30,12 @@
 
 ## 原理
 
-**虚拟显示器**：使用 CoreGraphics 内置的 `CGVirtualDisplay`（macOS 11 起提供，DeskPad、BetterDisplay 也用它），通过 [purego](https://github.com/ebitengine/purego) 从纯 Go 调用 Objective-C 运行时。显示器排列用 `kCGConfigureForSession` 修改，即使程序异常退出，注销后也会还原；进程退出时虚拟屏会随之消失。
+**虚拟显示器**：使用 CoreGraphics 内置的 `CGVirtualDisplay`（macOS 11 起提供，DeskPad、BetterDisplay 也用它），通过 [purego](https://github.com/ebitengine/purego) 从纯 Go 调用 Objective-C 运行时。显示器排列用 `kCGConfigureForSession` 修改，即使程序异常退出，注销后也会还原；进程退出时虚拟屏会随之消失。创建虚拟屏前会记下每块屏幕当时的显示模式（分辨率和刷新率），移除后逐一恢复：镜像结束或屏幕组合变化时，macOS 会按自己存的配置重选模式，内建屏可能换了分辨率，或从 ProMotion 掉到 47.95 Hz。
 
 **会话检测**：UU 远程没有公开 API。InfiWindow 用系统自带的 `nettop`（不需要 root）读取名字以 `UURemote` 开头的进程的网络流量，再用 `lsof` 统计这些进程的对端连接数：
 
 - 上行持续高于**开始阈值**（默认 120 KB/s，持续 2 秒）时，判定为有人连入。只看上行，所以用这台 Mac 去控制别的设备不会触发。
-- 上行低于**保持阈值**（默认 6 KB/s）且没有多出来的对端连接，持续**断开等待**时间（默认 25 秒）后，判定为会话结束。
+- **断开等待**时间（默认 25 秒）内的平均上行低于**保持阈值**（默认 6 KB/s），且没有多出来的对端连接时，判定为会话结束。用平均值是因为 UU 空闲时也会偶尔冒出 10–20 KB/s 的短暂上行，单看每一秒会让会话一直结束不了。
 
 不同网络和画质下流量差别很大。可以先连一次，对照窗口里的流量图，在“会话检测参数”里调整阈值。被监视的进程名前缀也能改，理论上同样适用于其他远程桌面软件。
 
