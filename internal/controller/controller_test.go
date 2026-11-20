@@ -19,6 +19,20 @@ type fakeDisplays struct {
 	creates int
 	fail    error
 	last    device.Spec
+	idle    []bool // TrackModes calls
+	adopts  int
+}
+
+// lastIdle returns the latest TrackModes argument and clears the record.
+func (f *fakeDisplays) lastIdle(t *testing.T) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.idle) == 0 {
+		t.Fatal("TrackModes not called")
+	}
+	v := f.idle[len(f.idle)-1]
+	f.idle = nil
+	return v
 }
 
 func (f *fakeDisplays) Create(s device.Spec, _ vdisplay.Layout) (uint32, error) {
@@ -39,6 +53,12 @@ func (f *fakeDisplays) Active() (uint32, bool) {
 	return 42, f.on
 }
 func (f *fakeDisplays) ListDisplays() []vdisplay.Display { return nil }
+func (f *fakeDisplays) TrackModes(idle bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.idle = append(f.idle, idle)
+}
+func (f *fakeDisplays) AdoptModes() { f.mu.Lock(); f.adopts++; f.mu.Unlock() }
 
 type fakeSource struct{ ch chan detector.Sample }
 
@@ -178,5 +198,52 @@ func TestCreateFailureBacksOff(t *testing.T) {
 	h.sample(500)
 	if h.disp.creates != 1 {
 		t.Fatalf("retried too soon: %d creates", h.disp.creates)
+	}
+}
+
+func TestTrackModesOnlyWhenIdle(t *testing.T) {
+	h := newHarness(t, nil)
+	h.settle()
+	if !h.disp.lastIdle(t) {
+		t.Fatal("not idle at start")
+	}
+	if h.sample(10); !h.disp.lastIdle(t) {
+		t.Fatal("low upload should count as idle")
+	}
+	// Upload rising: the remote app may already have changed the modes,
+	// even though the session is not detected yet.
+	h.ctl.SetConfig(func() config.Config {
+		c := config.Default()
+		c.Detect = detector.Params{ConnectKBps: 100, ConnectSeconds: 3, HoldKBps: 5, DisconnectSeconds: 3}
+		return c
+	}())
+	h.settle()
+	if s := h.sample(500); s.Connected || h.disp.lastIdle(t) {
+		t.Fatalf("starting session counted as idle (connected=%v)", s.Connected)
+	}
+	h.sample(500)
+	if s := h.sample(500); !s.DisplayOn || h.disp.lastIdle(t) {
+		t.Fatal("session counted as idle")
+	}
+	if h.sample(0); h.disp.lastIdle(t) {
+		t.Fatal("disconnect window counted as idle")
+	}
+	for range 4 {
+		h.sample(0)
+	}
+	if s := h.settle(); s.DisplayOn || !h.disp.lastIdle(t) {
+		t.Fatal("not idle after the session")
+	}
+	if h.disp.adopts != 0 {
+		t.Fatalf("auto create adopted modes %d times", h.disp.adopts)
+	}
+}
+
+func TestManualCreateAdoptsModes(t *testing.T) {
+	h := newHarness(t, nil)
+	h.settle()
+	h.ctl.CreateNow()
+	if s := h.settle(); !s.DisplayOn || h.disp.adopts != 1 {
+		t.Fatalf("on=%v adopts=%d, want adopt once", s.DisplayOn, h.disp.adopts)
 	}
 }

@@ -30,7 +30,7 @@
 
 ## 原理
 
-**虚拟显示器**：使用 CoreGraphics 内置的 `CGVirtualDisplay`（macOS 11 起提供，DeskPad、BetterDisplay 也用它），通过 [purego](https://github.com/ebitengine/purego) 从纯 Go 调用 Objective-C 运行时。显示器排列用 `kCGConfigureForSession` 修改，即使程序异常退出，注销后也会还原；进程退出时虚拟屏会随之消失。创建虚拟屏前会记下每块屏幕当时的显示模式（分辨率和刷新率），移除后逐一恢复：镜像结束或屏幕组合变化时，macOS 会按自己存的配置重选模式，内建屏可能换了分辨率，或从 ProMotion 掉到 47.95 Hz。
+**虚拟显示器**：使用 CoreGraphics 内置的 `CGVirtualDisplay`（macOS 11 起提供，DeskPad、BetterDisplay 也用它），通过 [purego](https://github.com/ebitengine/purego) 从纯 Go 调用 Objective-C 运行时。显示器排列用 `kCGConfigureForSession` 修改，即使程序异常退出，注销后也会还原；进程退出时虚拟屏会随之消失。虚拟屏移除后会把每块屏幕恢复到原来的显示模式（分辨率和刷新率）：镜像结束或屏幕组合变化时，macOS 会按自己存的配置重选模式，内建屏可能换了分辨率，或从 ProMotion 掉到 47.95 Hz。“原来的模式”不是在创建虚拟屏时拍的快照，因为 UU 远程在连接的那一刻就会把内建屏临时改成别的分辨率（比如 1800×1169 @59.94 Hz）。InfiWindow 只在空闲时记录模式：没有会话、没有虚拟屏、上行也低。新模式要在这种状态下保持 10 秒才会被采纳，所以记下的是你自己选的模式。
 
 **会话检测**：UU 远程没有公开 API。InfiWindow 用系统自带的 `nettop`（不需要 root）读取名字以 `UURemote` 开头的进程的网络流量，再用 `lsof` 统计这些进程的对端连接数：
 

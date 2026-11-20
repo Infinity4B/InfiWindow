@@ -22,6 +22,8 @@ type Displays interface {
 	Close()
 	Active() (uint32, bool)
 	ListDisplays() []vdisplay.Display
+	TrackModes(idle bool)
+	AdoptModes()
 }
 
 // Source produces traffic samples, as detector.Watcher does.
@@ -125,6 +127,7 @@ func (c *Controller) Run(ctx context.Context) {
 
 	c.logf(Info, "InfiWindow 已启动，%s", c.modeText())
 	c.refreshDisplays()
+	c.displays.TrackModes(c.idle())
 	c.emit()
 
 	tick := time.NewTicker(5 * time.Second)
@@ -150,6 +153,7 @@ func (c *Controller) Run(ctx context.Context) {
 			c.checkDisplay()
 			c.refreshDisplays()
 		}
+		c.displays.TrackModes(c.idle())
 		c.reconcile()
 		c.emit()
 	}
@@ -242,6 +246,13 @@ func (c *Controller) onSample(s detector.Sample) {
 	c.snap.Connected = c.machine.Connected()
 }
 
+// idle says no remote session is running or starting, so the display modes
+// are the user's own: remote desktop apps change them as they connect.
+func (c *Controller) idle() bool {
+	return !c.snap.DisplayOn && !c.machine.Connected() &&
+		c.snap.Sample.UploadKBps < c.cfg.Detect.ConnectKBps
+}
+
 func (c *Controller) desired() bool {
 	if c.snap.Manual {
 		return true
@@ -273,6 +284,11 @@ func (c *Controller) reconcile() {
 }
 
 func (c *Controller) create(spec device.Spec) {
+	if c.idle() {
+		// Turned on by hand outside a session: the user may have changed a
+		// resolution moments ago, so take the current modes as theirs.
+		c.displays.AdoptModes()
+	}
 	c.snap.Busy = true
 	c.emit()
 	defer func() { c.snap.Busy = false }()

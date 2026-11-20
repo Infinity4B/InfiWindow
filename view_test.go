@@ -24,6 +24,8 @@ func (nopDisplays) Destroy()                                            {}
 func (nopDisplays) Close()                                              {}
 func (nopDisplays) Active() (uint32, bool)                              { return 0, false }
 func (nopDisplays) ListDisplays() []vdisplay.Display                    { return nil }
+func (nopDisplays) TrackModes(bool)                                     {}
+func (nopDisplays) AdoptModes()                                         {}
 
 type nopSource struct{}
 
