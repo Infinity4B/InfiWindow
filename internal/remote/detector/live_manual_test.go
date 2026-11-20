@@ -1,6 +1,6 @@
 //go:build manual
 
-// CGO_ENABLED=0 go test -tags manual -run Live -v ./internal/detector
+// CGO_ENABLED=0 go test -tags manual -run Live -v ./internal/remote/detector
 package detector
 
 import (

@@ -11,11 +11,13 @@ import (
 
 	"github.com/egoist/mygo"
 
-	"github.com/Infinity4B/infiwindow/internal/config"
+	"github.com/egoist/mygo/ui"
+
+	"github.com/Infinity4B/infiwindow/internal/remote"
 )
 
 func (a *app) setupTray() {
-	a.trayStatus = &mygo.MenuItem{Label: "正在启动…", Disabled: true}
+	a.trayRemote = &mygo.MenuItem{Label: "远程扩展屏 · 正在启动…", Disabled: true}
 	a.trayToggle = &mygo.MenuItem{Label: "立即创建虚拟屏", Click: func(*mygo.MenuItem, *mygo.Window) {
 		if a.snap.DisplayOn {
 			a.ctl.RemoveNow()
@@ -23,24 +25,29 @@ func (a *app) setupTray() {
 			a.ctl.CreateNow()
 		}
 	}}
-	a.trayAuto = &mygo.MenuItem{Label: "UU 远程连接时自动创建", Type: mygo.MenuItemCheckbox,
-		Checked: a.edit.Mode == config.ModeAuto,
+	a.trayAuto = &mygo.MenuItem{Label: "远程连接时自动创建", Type: mygo.MenuItemCheckbox,
+		Checked: a.edit.Mode == remote.ModeAuto,
 		Click: func(it *mygo.MenuItem, _ *mygo.Window) {
 			if it.IsChecked() {
-				a.edit.Mode = config.ModeAuto
+				a.edit.Mode = remote.ModeAuto
 			} else {
-				a.edit.Mode = config.ModeManual
+				a.edit.Mode = remote.ModeManual
 			}
 			a.ctl.SetConfig(a.edit)
 			a.win.Invalidate()
 		}}
+	a.trayHiDPI = &mygo.MenuItem{Label: "外接屏 HiDPI…", Click: func(*mygo.MenuItem, *mygo.Window) {
+		a.page = pageHiDPI
+		a.showWindow()
+	}}
 	menu := mygo.NewMenu([]*mygo.MenuItem{
-		a.trayStatus,
-		mygo.Separator(),
-		{Label: "打开 InfiWindow", Click: func(*mygo.MenuItem, *mygo.Window) { a.showWindow() }},
+		a.trayRemote,
 		a.trayToggle,
 		a.trayAuto,
 		mygo.Separator(),
+		a.trayHiDPI,
+		mygo.Separator(),
+		{Label: "打开 InfiWindow", Click: func(*mygo.MenuItem, *mygo.Window) { a.showWindow() }},
 		{Label: "退出 InfiWindow", Accelerator: "CmdOrCtrl+Q", Click: func(*mygo.MenuItem, *mygo.Window) { mygo.App.Quit() }},
 	})
 	var err error
@@ -62,24 +69,18 @@ func (a *app) updateTray() {
 		return
 	}
 	s := a.snap
-	status := "等待 UU 远程连接"
-	switch {
-	case s.Busy:
-		status = "正在调整显示器…"
-	case s.DisplayOn:
-		status = fmt.Sprintf("虚拟屏运行中 · %d×%d", s.Spec.Selected.Width, s.Spec.Selected.Height)
-	case s.Connected:
-		status = "检测到远程会话"
-	case s.Config.Mode == config.ModeManual:
-		status = "手动模式"
+	title, _, _ := a.remoteStatus(&ui.Theme{})
+	status := "远程扩展屏 · " + title
+	if s.DisplayOn {
+		status = fmt.Sprintf("远程扩展屏 · 运行中 %d×%d", s.Spec.Selected.Width, s.Spec.Selected.Height)
 	}
-	a.trayStatus.SetLabel(status)
+	a.trayRemote.SetLabel(status)
 	if s.DisplayOn {
 		a.trayToggle.SetLabel("移除虚拟屏")
 	} else {
 		a.trayToggle.SetLabel("立即创建虚拟屏")
 	}
-	a.trayAuto.SetChecked(s.Config.Mode == config.ModeAuto)
+	a.trayAuto.SetChecked(s.Config.Mode == remote.ModeAuto)
 	if a.trayOn != s.DisplayOn || !a.trayInit {
 		a.trayOn, a.trayInit = s.DisplayOn, true
 		_ = a.tray.SetIcon(trayIcon(s.DisplayOn), true)
@@ -87,25 +88,25 @@ func (a *app) updateTray() {
 	}
 }
 
-// trayIcon draws an iPad in landscape, 18×18 pt at 2x, black on transparent
-// for macOS to tint. When the display is on the screen is filled.
+// trayIcon draws a window, 18×18 pt at 2x, black on transparent for macOS
+// to tint. While the remote display is on, the window is filled.
 func trayIcon(on bool) []byte {
 	const size = 36
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
-	// Rounded rectangle body.
-	x0, y0, x1, y1 := 3.0, 7.0, 33.0, 29.0
-	r := 4.0
+	x0, y0, x1, y1 := 3.0, 5.0, 33.0, 31.0
+	r := 4.5
 	stroke := 2.6
+	const barY = 12.0 // middle of the title bar line
 	for y := range size {
 		for x := range size {
 			px, py := float64(x)+0.5, float64(y)+0.5
 			d := roundedRectDist(px, py, x0, y0, x1, y1, r)
-			var alpha float64
+			inside := coverage(-(d + stroke))
+			alpha := coverage(-d) - inside
+			alpha += inside * coverage(1.2-math.Abs(py-barY))
 			if on {
-				// Outline plus a filled screen with a small gap.
-				alpha = coverage(-d) - coverage(-(d + stroke)) + coverage(-(d + stroke + 1.6))
-			} else {
-				alpha = coverage(-d) - coverage(-(d + stroke))
+				// The window's content, below the title bar with a small gap.
+				alpha += coverage(-(d + stroke + 1.6)) * coverage(py-(barY+2.8))
 			}
 			alpha = math.Max(0, math.Min(1, alpha))
 			img.SetNRGBA(x, y, color.NRGBA{A: uint8(alpha * 255)})

@@ -1,6 +1,11 @@
-// InfiWindow adds a virtual monitor sized for an iPad (iPad Pro 13" M4 by
-// default) whenever a UU Remote (UU 远程) session streams this Mac, so the
-// remote desktop fills the iPad screen instead of being letterboxed.
+// InfiWindow is a menu bar toolkit for the Mac's displays. Each feature is
+// independent:
+//
+//   - Remote display: while UU Remote (UU 远程) streams this Mac to an iPad,
+//     a virtual monitor sized like the iPad is added, so the remote desktop
+//     fills its screen instead of being letterboxed.
+//   - External-monitor HiDPI: scaled HiDPI resolutions for non-Retina
+//     monitors such as 2K panels, through a display override file.
 package main
 
 import (
@@ -8,15 +13,17 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
+	"github.com/Infinity4B/infiwindow/internal/activity"
 	"github.com/Infinity4B/infiwindow/internal/config"
-	"github.com/Infinity4B/infiwindow/internal/controller"
-	"github.com/Infinity4B/infiwindow/internal/detector"
-	"github.com/Infinity4B/infiwindow/internal/vdisplay"
+	"github.com/Infinity4B/infiwindow/internal/display"
+	"github.com/Infinity4B/infiwindow/internal/remote"
+	"github.com/Infinity4B/infiwindow/internal/remote/detector"
 )
 
 func main() {
@@ -27,7 +34,7 @@ func main() {
 	// A menu bar utility: no Dock icon, the window opens from the tray.
 	mygo.App.SetActivationPolicy(mygo.ActivationPolicyAccessory)
 
-	a := &app{}
+	a := newApp()
 	mygo.App.OnSecondInstance(func(args []string, _ string) {
 		if !a.handleArgs(args) {
 			a.showWindow()
@@ -42,25 +49,40 @@ func main() {
 	}
 }
 
+// store keeps the whole configuration so each feature can save its own
+// section from its own goroutine.
+type store struct {
+	mu   sync.Mutex
+	path string
+	cfg  config.Config
+}
+
+func (s *store) saveRemote(r remote.Config) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.Remote = r
+	return config.Save(s.path, s.cfg)
+}
+
 func (a *app) ready() {
 	dir, err := mygo.App.Path(mygo.PathUserData)
 	if err != nil {
 		log.Printf("user data dir: %v", err)
 	}
-	cfgPath := filepath.Join(dir, "config.json")
-	cfg, err := config.Load(cfgPath)
+	st := &store{path: filepath.Join(dir, "config.json")}
+	st.cfg, err = config.Load(st.path)
 	if err != nil {
 		log.Printf("config: %v (using defaults)", err)
 	}
-	a.edit = cfg
+	a.edit = st.cfg.Remote
 	a.openAtLogin = mygo.App.OpenAtLogin()
 	a.syncPresetName()
 
 	a.win = mygo.NewWindow(mygo.WindowOptions{
 		Title:         "InfiWindow",
-		Width:         980,
-		Height:        720,
-		MinWidth:      820,
+		Width:         1080,
+		Height:        740,
+		MinWidth:      900,
 		MinHeight:     560,
 		StateKey:      "main",
 		TitleBarStyle: mygo.TitleBarHidden,
@@ -68,34 +90,68 @@ func (a *app) ready() {
 		Content:       ui.View(a.view),
 	})
 	a.win.OnClose(func(e *mygo.CloseEvent) {
-		// Closing only hides: the app keeps watching from the menu bar.
+		// Closing only hides: the app keeps working from the menu bar.
 		if !a.quitting {
 			e.PreventDefault()
 			a.win.Hide()
 		}
 	})
+	a.log.Add(appSource, activity.Info, "InfiWindow 已启动")
 
 	a.setupTray()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
-	a.ctl = controller.New(cfg, vdisplay.NewManager(), detector.NewWatcher(cfg.Processes),
-		func(c config.Config) error { return config.Save(cfgPath, c) },
-		func(s controller.Snapshot) {
+	manager := display.NewManager()
+	a.ctl = remote.New(st.cfg.Remote, manager, detector.NewWatcher(st.cfg.Remote.Processes), a.log, st.saveRemote,
+		func(s remote.Snapshot) {
 			a.win.Update(func() {
+				prev := a.snap
 				a.snap = s
 				a.hasSnap = true
+				if prev.DisplayOn != s.DisplayOn || prev.DisplayID != s.DisplayID || prev.Busy != s.Busy {
+					a.refreshDisplays()
+				}
 				a.updateTray()
 			})
 		})
 	go a.ctl.Run(ctx)
+	go a.watchDisplays(ctx, manager.ListDisplays)
 	a.handleArgs(os.Args[1:])
+}
+
+// watchDisplays lists the displays every few seconds, and right away when
+// refreshDisplays asks, for every page that shows them.
+func (a *app) watchDisplays(ctx context.Context, list func() []display.Display) {
+	tick := time.NewTicker(3 * time.Second)
+	defer tick.Stop()
+	for {
+		ds := list()
+		a.win.Update(func() {
+			a.displays = ds
+			a.refreshOverrides()
+		})
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		case <-a.kick:
+		}
+	}
+}
+
+// refreshDisplays asks watchDisplays for a new list. Any goroutine.
+func (a *app) refreshDisplays() {
+	select {
+	case a.kick <- struct{}{}:
+	default:
+	}
 }
 
 // handleArgs runs command-line actions, so scripts and shortcuts can drive a
 // running InfiWindow:
 //
-//	open -a InfiWindow --args --create   # turn the virtual display on
+//	open -a InfiWindow --args --create   # turn the remote display on
 //	open -a InfiWindow --args --remove   # turn it off
 //
 // It reports whether an action was found.
