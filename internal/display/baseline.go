@@ -1,4 +1,4 @@
-package vdisplay
+package display
 
 import "time"
 

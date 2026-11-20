@@ -1,27 +1,26 @@
-// Package controller ties the session detector to the virtual display: it
-// creates the display when a remote session starts and removes it when the
-// session ends. One goroutine owns all state; the UI talks to it through
+// Package remote is the remote display feature: while a remote-desktop app
+// (UU Remote by default) streams this Mac, it adds a virtual display sized
+// like the remote device. The Controller ties the session detector to the
+// virtual display; one goroutine owns all state, the UI talks to it through
 // methods that queue commands and receives immutable snapshots.
-package controller
+package remote
 
 import (
 	"context"
-	"fmt"
 	"time"
 
-	"github.com/Infinity4B/infiwindow/internal/config"
-	"github.com/Infinity4B/infiwindow/internal/detector"
-	"github.com/Infinity4B/infiwindow/internal/device"
-	"github.com/Infinity4B/infiwindow/internal/vdisplay"
+	"github.com/Infinity4B/infiwindow/internal/activity"
+	"github.com/Infinity4B/infiwindow/internal/display"
+	"github.com/Infinity4B/infiwindow/internal/remote/detector"
+	"github.com/Infinity4B/infiwindow/internal/remote/device"
 )
 
-// Displays is what the controller needs from vdisplay.Manager.
+// Displays is what the controller needs from display.Manager.
 type Displays interface {
-	Create(spec device.Spec, layout vdisplay.Layout) (uint32, error)
+	Create(spec device.Spec, layout display.Layout) (uint32, error)
 	Destroy()
 	Close()
 	Active() (uint32, bool)
-	ListDisplays() []vdisplay.Display
 	TrackModes(idle bool)
 	AdoptModes()
 }
@@ -32,31 +31,15 @@ type Source interface {
 	SetPrefixes(prefixes []string)
 }
 
-// Level of a log entry.
-type Level int
-
-const (
-	Info Level = iota
-	Good
-	Warn
-	Bad
-)
-
-// LogEntry is one line of the activity log.
-type LogEntry struct {
-	At    time.Time
-	Level Level
-	Text  string
-}
-
 // HistoryLen is how many upload samples (seconds) the snapshot keeps.
 const HistoryLen = 90
 
-const maxLogs = 200
+// LogSource tags the entries this feature writes to the activity log.
+const LogSource = "远程扩展屏"
 
 // Snapshot is the state the UI shows. It is never modified after publishing.
 type Snapshot struct {
-	Config    config.Config
+	Config    Config
 	Spec      device.Spec
 	SpecErr   string
 	Connected bool // a remote session is detected
@@ -71,8 +54,6 @@ type Snapshot struct {
 	DisplayID  uint32
 	Busy       bool
 	LastErr    string
-	Logs       []LogEntry
-	Displays   []vdisplay.Display
 	Since      time.Time // when the display was created
 }
 
@@ -80,7 +61,8 @@ type Snapshot struct {
 type Controller struct {
 	displays Displays
 	source   Source
-	save     func(config.Config) error
+	log      *activity.Log
+	save     func(Config) error
 	publish  func(Snapshot)
 	now      func() time.Time
 
@@ -88,23 +70,23 @@ type Controller struct {
 	done chan struct{}
 
 	// Owned by the Run goroutine.
-	cfg        config.Config
+	cfg        Config
 	machine    *detector.Machine
 	snap       Snapshot
 	history    []float64
-	logs       []LogEntry
 	retryAfter time.Time
 	builtSpec  device.Spec
-	builtLay   vdisplay.Layout
+	builtLay   display.Layout
 }
 
-// New makes a controller. publish is called from the controller goroutine
+// New makes a controller writing to log. publish is called from the controller goroutine
 // with every new snapshot; save persists configuration changes.
-func New(cfg config.Config, displays Displays, source Source, save func(config.Config) error, publish func(Snapshot)) *Controller {
+func New(cfg Config, displays Displays, source Source, log *activity.Log, save func(Config) error, publish func(Snapshot)) *Controller {
 	cfg = cfg.Normalize()
 	c := &Controller{
 		displays: displays,
 		source:   source,
+		log:      log,
 		save:     save,
 		publish:  publish,
 		now:      time.Now,
@@ -125,8 +107,7 @@ func (c *Controller) Run(ctx context.Context) {
 	errs := make(chan error, 1)
 	go c.source.Run(ctx, samples, errs)
 
-	c.logf(Info, "InfiWindow 已启动，%s", c.modeText())
-	c.refreshDisplays()
+	c.logf(activity.Info, "%s", c.modeText())
 	c.displays.TrackModes(c.idle())
 	c.emit()
 
@@ -144,14 +125,13 @@ func (c *Controller) Run(ctx context.Context) {
 		case err := <-errs:
 			msg := "无法读取网络流量: " + err.Error()
 			if c.snap.WatchErr != msg {
-				c.logf(Bad, "%s", msg)
+				c.logf(activity.Bad, "%s", msg)
 			}
 			c.snap.WatchErr = msg
 		case fn := <-c.cmds:
 			fn()
 		case <-tick.C:
 			c.checkDisplay()
-			c.refreshDisplays()
 		}
 		c.displays.TrackModes(c.idle())
 		c.reconcile()
@@ -170,7 +150,7 @@ func (c *Controller) send(fn func()) {
 }
 
 // SetConfig applies and saves a new configuration.
-func (c *Controller) SetConfig(cfg config.Config) {
+func (c *Controller) SetConfig(cfg Config) {
 	c.send(func() {
 		cfg = cfg.Normalize()
 		old := c.cfg
@@ -178,10 +158,10 @@ func (c *Controller) SetConfig(cfg config.Config) {
 		c.machine.SetParams(cfg.Detect)
 		c.source.SetPrefixes(cfg.Processes)
 		if old.Mode != cfg.Mode {
-			c.logf(Info, "切换为%s", c.modeText())
+			c.logf(activity.Info, "切换为%s", c.modeText())
 		}
 		if err := c.save(cfg); err != nil {
-			c.logf(Bad, "保存设置失败: %v", err)
+			c.logf(activity.Bad, "保存设置失败: %v", err)
 		}
 		c.retryAfter = time.Time{}
 	})
@@ -216,13 +196,8 @@ func (c *Controller) Recreate() {
 	})
 }
 
-// ClearLog empties the activity log.
-func (c *Controller) ClearLog() {
-	c.send(func() { c.logs = nil })
-}
-
 func (c *Controller) modeText() string {
-	if c.cfg.Mode == config.ModeAuto {
+	if c.cfg.Mode == ModeAuto {
 		return "自动模式：检测到 UU 远程连接时创建虚拟屏"
 	}
 	return "手动模式：仅通过按钮创建虚拟屏"
@@ -237,9 +212,9 @@ func (c *Controller) onSample(s detector.Sample) {
 	}
 	if c.machine.Step(s.At, s.UploadKBps, s.Conns) {
 		if c.machine.Connected() {
-			c.logf(Good, "检测到远程会话（上行 %.0f KB/s）", s.UploadKBps)
+			c.logf(activity.Good, "检测到远程会话（上行 %.0f KB/s）", s.UploadKBps)
 		} else {
-			c.logf(Info, "远程会话已结束")
+			c.logf(activity.Info, "远程会话已结束")
 			c.snap.Suppressed = false
 		}
 	}
@@ -257,7 +232,7 @@ func (c *Controller) desired() bool {
 	if c.snap.Manual {
 		return true
 	}
-	return c.cfg.Mode == config.ModeAuto && c.snap.Connected && !c.snap.Suppressed
+	return c.cfg.Mode == ModeAuto && c.snap.Connected && !c.snap.Suppressed
 }
 
 func (c *Controller) reconcile() {
@@ -271,7 +246,7 @@ func (c *Controller) reconcile() {
 
 	switch {
 	case want && c.snap.DisplayOn && (!specEqual(spec, c.builtSpec) || c.builtLay != c.cfg.Layout):
-		c.logf(Info, "设置已变更，重建虚拟屏")
+		c.logf(activity.Info, "设置已变更，重建虚拟屏")
 		c.create(spec)
 	case want && !c.snap.DisplayOn:
 		if c.now().Before(c.retryAfter) {
@@ -299,8 +274,7 @@ func (c *Controller) create(spec device.Spec) {
 		c.snap.DisplayOn, c.snap.DisplayID = false, 0
 		c.snap.LastErr = err.Error()
 		c.retryAfter = c.now().Add(15 * time.Second)
-		c.logf(Bad, "创建虚拟屏失败: %v（15 秒后重试）", err)
-		c.refreshDisplays()
+		c.logf(activity.Bad, "创建虚拟屏失败: %v（15 秒后重试）", err)
 		return
 	}
 	c.snap.DisplayOn, c.snap.DisplayID = true, id
@@ -308,12 +282,11 @@ func (c *Controller) create(spec device.Spec) {
 	c.snap.LastErr = ""
 	if err != nil {
 		c.snap.LastErr = err.Error()
-		c.logf(Warn, "%v", err)
+		c.logf(activity.Warn, "%v", err)
 	}
 	w, h := spec.Selected.PixelSize()
-	c.logf(Good, "虚拟屏已创建：%d×%d pt（%d×%d px）@%gHz，%s",
+	c.logf(activity.Good, "虚拟屏已创建：%d×%d pt（%d×%d px）@%gHz，%s",
 		spec.Selected.Width, spec.Selected.Height, w, h, spec.RefreshHz, layoutText(c.cfg.Layout))
-	c.refreshDisplays()
 }
 
 func (c *Controller) destroy() {
@@ -323,8 +296,7 @@ func (c *Controller) destroy() {
 	c.snap.Busy = false
 	c.snap.DisplayOn, c.snap.DisplayID = false, 0
 	c.builtSpec = device.Spec{}
-	c.logf(Info, "虚拟屏已移除，显示器排列已恢复")
-	c.refreshDisplays()
+	c.logf(activity.Info, "虚拟屏已移除，显示器排列已恢复")
 }
 
 // checkDisplay notices a display that macOS removed behind our back.
@@ -335,35 +307,26 @@ func (c *Controller) checkDisplay() {
 	if _, ok := c.displays.Active(); !ok {
 		c.snap.DisplayOn, c.snap.DisplayID = false, 0
 		c.builtSpec = device.Spec{}
-		c.logf(Warn, "虚拟屏被系统移除")
+		c.logf(activity.Warn, "虚拟屏被系统移除")
 	}
 }
 
-func (c *Controller) refreshDisplays() {
-	c.snap.Displays = c.displays.ListDisplays()
-}
-
-func (c *Controller) logf(level Level, format string, args ...any) {
-	c.logs = append(c.logs, LogEntry{At: c.now(), Level: level, Text: fmt.Sprintf(format, args...)})
-	if len(c.logs) > maxLogs {
-		c.logs = c.logs[len(c.logs)-maxLogs:]
-	}
+func (c *Controller) logf(level activity.Level, format string, args ...any) {
+	c.log.Add(LogSource, level, format, args...)
 }
 
 func (c *Controller) emit() {
 	s := c.snap
 	s.Config = c.cfg
 	s.History = append([]float64(nil), c.history...)
-	s.Logs = append([]LogEntry(nil), c.logs...)
-	s.Displays = append([]vdisplay.Display(nil), c.snap.Displays...)
 	c.publish(s)
 }
 
-func layoutText(l vdisplay.Layout) string {
+func layoutText(l display.Layout) string {
 	switch l {
-	case vdisplay.LayoutMirror:
+	case display.LayoutMirror:
 		return "其他屏幕镜像虚拟屏"
-	case vdisplay.LayoutMain:
+	case display.LayoutMain:
 		return "设为主显示器"
 	default:
 		return "扩展显示"

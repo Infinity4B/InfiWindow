@@ -1,12 +1,11 @@
-// Package vdisplay creates a virtual monitor sized like the remote device and
-// arranges it so that remote-desktop apps stream it.
-package vdisplay
+// Package display talks to the Mac's displays through CoreGraphics: it lists
+// them with their modes, switches modes, and creates virtual monitors
+// (CGVirtualDisplay) arranged beside, as main, or mirrored by the others.
+package display
 
 import (
 	"errors"
 	"hash/fnv"
-
-	"github.com/Infinity4B/infiwindow/internal/device"
 )
 
 // Layout says how the virtual display joins the existing ones.
@@ -39,11 +38,27 @@ type Display struct {
 	Builtin     bool    `json:"builtin"`
 	Virtual     bool    `json:"virtual"`  // created by InfiWindow
 	MirrorOf    uint32  `json:"mirrorOf"` // 0 when not mirroring
+	// External monitors only: their EDID IDs, largest 1x mode, and the
+	// HiDPI sizes macOS offers for them (in points).
+	VendorID  uint32       `json:"vendorId,omitempty"`
+	ProductID uint32       `json:"productId,omitempty"`
+	NativeW   int          `json:"nativeW,omitempty"`
+	NativeH   int          `json:"nativeH,omitempty"`
+	Scaled    []ScaledSize `json:"scaled,omitempty"`
 }
+
+// ScaledSize is a HiDPI mode a display offers, in points.
+type ScaledSize struct {
+	W int `json:"w"`
+	H int `json:"h"`
+}
+
+// HiDPI reports whether the display currently runs a 2x mode.
+func (d Display) HiDPI() bool { return d.PixelWidth > d.Width }
 
 // Serial derives a stable serial number from the spec, so macOS remembers
 // arrangement and colour settings per resolution/orientation.
-func Serial(s device.Spec) uint32 {
+func Serial(s Spec) uint32 {
 	h := fnv.New32a()
 	for _, m := range s.Modes {
 		h.Write([]byte{byte(m.Width >> 8), byte(m.Width), byte(m.Height >> 8), byte(m.Height)})

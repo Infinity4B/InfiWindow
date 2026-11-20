@@ -1,4 +1,4 @@
-package controller
+package remote
 
 import (
 	"context"
@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Infinity4B/infiwindow/internal/config"
-	"github.com/Infinity4B/infiwindow/internal/detector"
-	"github.com/Infinity4B/infiwindow/internal/device"
-	"github.com/Infinity4B/infiwindow/internal/vdisplay"
+	"github.com/Infinity4B/infiwindow/internal/activity"
+	"github.com/Infinity4B/infiwindow/internal/display"
+	"github.com/Infinity4B/infiwindow/internal/remote/detector"
+	"github.com/Infinity4B/infiwindow/internal/remote/device"
 )
 
 type fakeDisplays struct {
@@ -35,7 +35,7 @@ func (f *fakeDisplays) lastIdle(t *testing.T) bool {
 	return v
 }
 
-func (f *fakeDisplays) Create(s device.Spec, _ vdisplay.Layout) (uint32, error) {
+func (f *fakeDisplays) Create(s device.Spec, _ display.Layout) (uint32, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.creates++
@@ -52,7 +52,6 @@ func (f *fakeDisplays) Active() (uint32, bool) {
 	defer f.mu.Unlock()
 	return 42, f.on
 }
-func (f *fakeDisplays) ListDisplays() []vdisplay.Display { return nil }
 func (f *fakeDisplays) TrackModes(idle bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -83,15 +82,15 @@ type harness struct {
 	clock time.Time
 }
 
-func newHarness(t *testing.T, mutate func(*config.Config)) *harness {
-	cfg := config.Default()
+func newHarness(t *testing.T, mutate func(*Config)) *harness {
+	cfg := DefaultConfig()
 	cfg.Detect = detector.Params{ConnectKBps: 100, ConnectSeconds: 1, HoldKBps: 5, DisconnectSeconds: 3}
 	if mutate != nil {
 		mutate(&cfg)
 	}
 	h := &harness{t: t, disp: &fakeDisplays{}, src: &fakeSource{ch: make(chan detector.Sample)},
 		snaps: make(chan Snapshot, 256), clock: time.Unix(1000, 0)}
-	h.ctl = New(cfg, h.disp, h.src, func(config.Config) error { return nil }, func(s Snapshot) { h.snaps <- s })
+	h.ctl = New(cfg, h.disp, h.src, activity.New(nil), func(Config) error { return nil }, func(s Snapshot) { h.snaps <- s })
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); <-h.ctl.Done() })
 	go h.ctl.Run(ctx)
@@ -138,7 +137,7 @@ func TestAutoCreatesAndRemoves(t *testing.T) {
 }
 
 func TestManualModeIgnoresSessions(t *testing.T) {
-	h := newHarness(t, func(c *config.Config) { c.Mode = config.ModeManual })
+	h := newHarness(t, func(c *Config) { c.Mode = ModeManual })
 	h.settle()
 	if s := h.sample(500); !s.Connected || s.DisplayOn {
 		t.Fatalf("manual mode must not auto-create: %+v", s.DisplayOn)
@@ -176,7 +175,7 @@ func TestConfigChangeRecreates(t *testing.T) {
 	h := newHarness(t, nil)
 	h.settle()
 	h.sample(500)
-	cfg := config.Default()
+	cfg := DefaultConfig()
 	cfg.Detect = detector.Params{ConnectKBps: 100, ConnectSeconds: 1, HoldKBps: 5, DisconnectSeconds: 3}
 	cfg.Device.Portrait = true
 	h.ctl.SetConfig(cfg)
@@ -212,8 +211,8 @@ func TestTrackModesOnlyWhenIdle(t *testing.T) {
 	}
 	// Upload rising: the remote app may already have changed the modes,
 	// even though the session is not detected yet.
-	h.ctl.SetConfig(func() config.Config {
-		c := config.Default()
+	h.ctl.SetConfig(func() Config {
+		c := DefaultConfig()
 		c.Detect = detector.Params{ConnectKBps: 100, ConnectSeconds: 3, HoldKBps: 5, DisconnectSeconds: 3}
 		return c
 	}())

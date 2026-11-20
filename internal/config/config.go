@@ -1,4 +1,5 @@
-// Package config stores InfiWindow's settings as JSON.
+// Package config stores InfiWindow's settings as JSON, one section per
+// feature.
 package config
 
 import (
@@ -6,83 +7,30 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 
-	"github.com/Infinity4B/infiwindow/internal/detector"
-	"github.com/Infinity4B/infiwindow/internal/device"
-	"github.com/Infinity4B/infiwindow/internal/vdisplay"
+	"github.com/Infinity4B/infiwindow/internal/remote"
 )
 
-// Mode says what drives the virtual display.
-type Mode string
-
-const (
-	ModeAuto   Mode = "auto"   // follow UU Remote sessions
-	ModeManual Mode = "manual" // only the buttons
-)
-
-// Config is everything the user can change.
+// Config is everything the user can change. External-monitor HiDPI keeps
+// its state in the display override files themselves, so it has no section.
 type Config struct {
-	Device device.Options  `json:"device"`
-	Layout vdisplay.Layout `json:"layout"`
-	Mode   Mode            `json:"mode"`
-	// Processes are name prefixes of the remote-desktop processes to watch.
-	Processes []string        `json:"processes"`
-	Detect    detector.Params `json:"detect"`
+	Remote remote.Config `json:"remote"`
 }
 
-// Default targets an iPad Pro 13" (M4) over UU Remote.
+// Default is the configuration of a fresh install.
 func Default() Config {
-	return Config{
-		Device: device.Options{
-			PresetID:  device.DefaultPresetID,
-			Scale:     device.ScaleDefault,
-			RefreshHz: 60,
-		},
-		Layout:    vdisplay.LayoutMirror,
-		Mode:      ModeAuto,
-		Processes: []string{"UURemote"},
-		Detect:    detector.DefaultParams(),
-	}
+	return Config{Remote: remote.DefaultConfig()}
 }
 
 // Normalize fills in missing or invalid values with defaults.
 func (c Config) Normalize() Config {
-	d := Default()
-	if device.Find(c.Device.PresetID).ID != c.Device.PresetID {
-		c.Device.PresetID = d.Device.PresetID
-	}
-	switch c.Device.Scale {
-	case device.ScaleLarger, device.ScaleDefault, device.ScaleMore, device.ScaleNative:
-	default:
-		c.Device.Scale = d.Device.Scale
-	}
-	if c.Device.RefreshHz != 60 && c.Device.RefreshHz != 120 {
-		c.Device.RefreshHz = 60
-	}
-	switch c.Layout {
-	case vdisplay.LayoutMirror, vdisplay.LayoutMain, vdisplay.LayoutExtend:
-	default:
-		c.Layout = d.Layout
-	}
-	if c.Mode != ModeAuto && c.Mode != ModeManual {
-		c.Mode = d.Mode
-	}
-	var procs []string
-	for _, p := range c.Processes {
-		if p = strings.TrimSpace(p); p != "" {
-			procs = append(procs, p)
-		}
-	}
-	if len(procs) == 0 {
-		procs = d.Processes
-	}
-	c.Processes = procs
-	c.Detect = c.Detect.Normalize()
+	c.Remote = c.Remote.Normalize()
 	return c
 }
 
-// Load reads path, returning defaults when it does not exist.
+// Load reads path, returning defaults when it does not exist. Files from
+// before the per-feature sections (the remote settings at the top level)
+// are read too.
 func Load(path string) (Config, error) {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -91,7 +39,17 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Default(), err
 	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(b, &probe); err != nil {
+		return Default(), err
+	}
 	c := Default()
+	if _, ok := probe["remote"]; !ok {
+		if _, legacy := probe["device"]; legacy {
+			err := json.Unmarshal(b, &c.Remote)
+			return c.Normalize(), err
+		}
+	}
 	if err := json.Unmarshal(b, &c); err != nil {
 		return Default(), err
 	}

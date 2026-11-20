@@ -1,6 +1,6 @@
 //go:build manual
 
-// Run with: CGO_ENABLED=0 go test -tags manual -run Manual -v ./internal/vdisplay
+// Run with: CGO_ENABLED=0 go test -tags manual -run Manual -v ./internal/display
 // It briefly adds a real virtual display to this Mac.
 //
 // A process without AppKit that queried the displays before creating one
@@ -8,14 +8,15 @@
 // displays' modes first, so this test fails with "系统未提供 … 的显示模式".
 // Check the real app instead: InfiWindow --create / --remove, and list the
 // displays from another process with -run ManualList.
-package vdisplay
+package display_test
 
 import (
 	"os"
 	"testing"
 	"time"
 
-	"github.com/Infinity4B/infiwindow/internal/device"
+	"github.com/Infinity4B/infiwindow/internal/display"
+	"github.com/Infinity4B/infiwindow/internal/remote/device"
 )
 
 func TestManualCreate(t *testing.T) {
@@ -23,11 +24,11 @@ func TestManualCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	layout := Layout(os.Getenv("IW_LAYOUT"))
+	layout := display.Layout(os.Getenv("IW_LAYOUT"))
 	if layout == "" {
-		layout = LayoutExtend
+		layout = display.LayoutExtend
 	}
-	m := NewManager()
+	m := display.NewManager()
 	id, err := m.Create(spec, layout)
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +52,7 @@ func TestManualCreate(t *testing.T) {
 	}
 	time.Sleep(time.Second)
 	m.Destroy()
-	if layout != LayoutExtend {
+	if layout != display.LayoutExtend {
 		// Without a run loop this process never hears that the mirror set
 		// changed, so its display list goes stale; check from another
 		// process (-run ManualList) instead.
@@ -60,7 +61,7 @@ func TestManualCreate(t *testing.T) {
 	start := time.Now()
 	for {
 		gone := true
-		for _, d := range ListDisplays() {
+		for _, d := range display.ListDisplays() {
 			if d.ID == id {
 				gone = false
 			}

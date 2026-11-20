@@ -1,6 +1,6 @@
 //go:build manual
 
-package vdisplay
+package display
 
 import "testing"
 
