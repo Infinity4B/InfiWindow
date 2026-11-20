@@ -199,17 +199,18 @@ type Manager struct {
 	layout  Layout
 	// prevMain is the main display before LayoutMain moved it.
 	prevMain uint32
-	// saved are the modes the other displays had before the virtual one
-	// came: mirroring switches them to a mode that fits the iPad, and when
-	// it ends macOS picks one by itself, often another resolution or a
-	// fixed 47.95 Hz instead of ProMotion.
+	// base learns the mode the user chose for each display, see TrackModes.
+	base *baseline[modeKey]
+	// saved are the modes to put back once the virtual display is gone:
+	// mirroring switches the other displays to a mode that fits the iPad,
+	// and when it ends macOS picks one by itself, often another resolution
+	// or a fixed 47.95 Hz instead of ProMotion.
 	saved []savedMode
 }
 
 // savedMode is a display mode remembered for restoring.
 type savedMode struct {
 	display uint32
-	mode    uintptr // retained CGDisplayModeRef
 	key     modeKey
 }
 
@@ -228,7 +229,62 @@ func keyOf(md uintptr) modeKey {
 	}
 }
 
-func NewManager() *Manager { return &Manager{} }
+// sameSize reports whether a and b differ at most in the mode ID, which
+// macOS may renumber when it rebuilds a display's mode list.
+func (k modeKey) sameSize(o modeKey) bool {
+	k.ioID, o.ioID = 0, 0
+	return k == o
+}
+
+func NewManager() *Manager { return &Manager{base: newBaseline[modeKey](ModeSettle)} }
+
+// TrackModes learns which mode the user chose for each display. Call it
+// regularly; idle says no remote session is running or starting. Remote
+// desktop apps change the resolution as they connect, before the session is
+// detected, so the modes seen when the virtual display is created are not
+// necessarily the user's. Only a mode that stays for ModeSettle while idle
+// and without a virtual display is learned.
+func (m *Manager) TrackModes(idle bool) {
+	if load() != nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !idle || m.display != 0 {
+		m.base.interrupt()
+		return
+	}
+	m.base.observe(time.Now(), currentModes())
+}
+
+// AdoptModes takes the current modes as the user's choice right away, for
+// when the user turns the display on by hand outside a session and may just
+// have picked a resolution.
+func (m *Manager) AdoptModes() {
+	if load() != nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.display != 0 {
+		return
+	}
+	m.base.adopt(currentModes())
+}
+
+// currentModes returns the mode of every online display.
+func currentModes() map[uint32]modeKey {
+	out := map[uint32]modeKey{}
+	withPool(func() {
+		for _, d := range onlineDisplays() {
+			if md := cgCopyMode(d); md != 0 {
+				out[d] = keyOf(md)
+				cgModeRelease(md)
+			}
+		}
+	})
+	return out
+}
 
 // Supported reports whether CGVirtualDisplay is available.
 func (m *Manager) Supported() bool { return load() == nil }
@@ -261,7 +317,7 @@ func (m *Manager) Create(spec device.Spec, layout Layout) (uint32, error) {
 		m.saveModes()
 		id, err = m.createLocked(spec)
 		if err != nil {
-			m.releaseSaved()
+			m.saved = nil
 		}
 	})
 	if err != nil {
@@ -523,21 +579,22 @@ func (m *Manager) destroyLocked(wait bool) {
 	m.restoreModes(id, relaid, wait)
 }
 
-// saveModes remembers the current mode of every online display.
+// saveModes picks the mode to restore for every online display: the one
+// the user chose as learned by TrackModes, else the current one.
 func (m *Manager) saveModes() {
-	m.releaseSaved()
-	for _, d := range onlineDisplays() {
-		if md := cgCopyMode(d); md != 0 {
-			m.saved = append(m.saved, savedMode{display: d, mode: md, key: keyOf(md)})
-		}
-	}
-}
-
-func (m *Manager) releaseSaved() {
-	for _, s := range m.saved {
-		cgModeRelease(s.mode)
-	}
 	m.saved = nil
+	for _, d := range onlineDisplays() {
+		key, ok := m.base.get(d)
+		if !ok {
+			md := cgCopyMode(d)
+			if md == 0 {
+				continue
+			}
+			key = keyOf(md)
+			cgModeRelease(md)
+		}
+		m.saved = append(m.saved, savedMode{display: d, key: key})
+	}
 }
 
 // restoreModes puts the saved modes back once the virtual display vid is
@@ -551,7 +608,7 @@ func (m *Manager) restoreModes(vid uint32, relaid, wait bool) {
 	if len(m.saved) == 0 {
 		return
 	}
-	defer m.releaseSaved()
+	defer func() { m.saved = nil }()
 	if !wait {
 		withPool(func() { m.applySavedModes(relaid) })
 		return
@@ -587,30 +644,31 @@ func (m *Manager) applySavedModes(force bool) bool {
 		if cur == 0 {
 			continue
 		}
-		same := keyOf(cur) == s.key
+		same := keyOf(cur).sameSize(s.key)
 		cgModeRelease(cur)
 		if same && !force {
 			continue
 		}
-		// Prefer the display's own mode object (it may have been rebuilt
-		// since); the saved reference is the fallback.
-		md := s.mode
 		yes := objc.ID(clsNSNumber).Send(sel("numberWithBool:"), true)
 		opts := objc.ID(clsNSDictionary).Send(sel("dictionaryWithObject:forKey:"), yes, objc.ID(kShowDuplicateLowRes))
 		all := cgCopyAllModes(s.display, uintptr(opts))
-		if all != 0 {
-			for i := range cfArrayGetCount(all) {
-				if c := cfArrayGetValueAt(all, i); keyOf(c) == s.key {
-					md = c
-					break
-				}
+		if all == 0 {
+			continue
+		}
+		// The configuration uses the mode objects until it completes.
+		defer cfRelease(all)
+		var md uintptr
+		for i := range cfArrayGetCount(all) {
+			c := cfArrayGetValueAt(all, i)
+			if k := keyOf(c); k == s.key {
+				md = c
+				break
+			} else if md == 0 && k.sameSize(s.key) {
+				md = c
 			}
 		}
-		if cgConfigureMode(cfg, s.display, md, 0) == 0 {
+		if md != 0 && cgConfigureMode(cfg, s.display, md, 0) == 0 {
 			changed = true
-		}
-		if all != 0 {
-			defer cfRelease(all)
 		}
 	}
 	if !changed {
