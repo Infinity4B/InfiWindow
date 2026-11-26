@@ -14,17 +14,23 @@ import (
 )
 
 // The remote display page: while a remote-desktop app streams this Mac, a
-// virtual display sized like the iPad is added.
+// virtual display sized like the remote client (iPad or PC) is added.
+
+const customPresetLabel = "自定义分辨率"
 
 var (
-	orientLabels = []string{"横屏", "竖屏"}
-	scaleKeys    = []string{device.ScaleLarger, device.ScaleDefault, device.ScaleMore, device.ScaleNative}
-	scaleLabels  = []string{"放大", "默认", "缩小", "原生 1:1"}
-	hzValues     = []int{60, 120}
-	layoutKeys   = []display.Layout{display.LayoutMirror, display.LayoutMain, display.LayoutExtend}
-	layoutLabels = []string{"镜像", "主显示器", "扩展"}
-	layoutHelp   = []string{
-		"其他屏幕都镜像虚拟屏：UU 远程无论采集哪块屏幕，iPad 上都是铺满的画面。推荐。",
+	kindKeys      = []device.Kind{device.KindIPad, device.KindPC}
+	kindLabels    = []string{"iPad", "电脑"}
+	orientLabels  = []string{"横屏", "竖屏"}
+	scaleKeys     = []string{device.ScaleLarger, device.ScaleDefault, device.ScaleMore, device.ScaleNative}
+	scaleLabels   = []string{"放大", "默认", "缩小", "原生 1:1"}
+	pcScaleKeys   = []string{device.ScaleNative, device.Scale125, device.Scale150, device.Scale200}
+	pcScaleLabels = []string{"100%", "125%", "150%", "200%"}
+	hzValues      = []int{60, 120}
+	layoutKeys    = []display.Layout{display.LayoutMirror, display.LayoutMain, display.LayoutExtend}
+	layoutLabels  = []string{"镜像", "主显示器", "扩展"}
+	layoutHelp    = []string{
+		"其他屏幕都镜像虚拟屏：UU 远程无论采集哪块屏幕，客户端上都是铺满的画面。推荐。",
 		"虚拟屏成为主显示器（菜单栏和程序坞在上面），其他屏幕保持扩展。",
 		"只在旁边加一块虚拟屏，需要在 UU 远程里手动切换到它。",
 	}
@@ -45,8 +51,32 @@ func (a *app) remotePage(c *ui.Context) {
 
 func (a *app) apply() { a.ctl.SetConfig(a.edit) }
 
+func (a *app) switchActive(kind device.Kind) {
+	if a.edit.Active == kind {
+		return
+	}
+	a.edit.Active = kind
+	a.syncPresetName()
+	a.apply()
+	if a.win != nil {
+		a.win.Invalidate()
+	}
+}
+
 func (a *app) syncPresetName() {
-	a.presetName = device.Find(a.edit.Device.PresetID).Name
+	dev := a.edit.ActiveDevice()
+	if dev.CustomW > 0 && dev.CustomH > 0 {
+		a.presetName = customPresetLabel
+		return
+	}
+	a.presetName = device.Find(dev.PresetID).Name
+}
+
+func profileBrief(o device.Options) string {
+	if o.CustomW > 0 && o.CustomH > 0 {
+		return fmt.Sprintf("自定义 %d×%d", o.CustomW, o.CustomH)
+	}
+	return device.Find(o.PresetID).Name
 }
 
 // remoteStatus sums up the remote display for the page, the overview and
@@ -54,7 +84,7 @@ func (a *app) syncPresetName() {
 func (a *app) remoteStatus(t *ui.Theme) (title string, dot ui.Color, hint string) {
 	s := a.snap
 	title, dot = "等待远程连接", t.TextMuted
-	hint = "在 iPad 上用 UU 远程连接这台 Mac，InfiWindow 会自动创建虚拟屏，断开后自动移除。"
+	hint = "在 iPad 或电脑上用 UU 远程连接这台 Mac，InfiWindow 会自动创建虚拟屏，断开后自动移除。"
 	switch {
 	case !a.hasSnap:
 		title, hint = "正在启动…", ""
@@ -62,7 +92,7 @@ func (a *app) remoteStatus(t *ui.Theme) (title string, dot ui.Color, hint string
 		title, dot, hint = "正在调整显示器…", t.Warning, "屏幕可能会闪烁一下。"
 	case s.DisplayOn:
 		title, dot = "虚拟屏运行中", t.Success
-		hint = fmt.Sprintf("已运行 %s · 显示器 ID %d", since(s.Since), s.DisplayID)
+		hint = fmt.Sprintf("%s配置 · 已运行 %s · 显示器 ID %d", device.KindLabel(s.Config.Active), since(s.Since), s.DisplayID)
 		if s.Connected {
 			hint += " · 远程会话中"
 		}
@@ -90,12 +120,14 @@ func (a *app) statusCard(c *ui.Context) {
 			ui.Text(c, hint).FontSize(13).TextColor(t.TextMuted).Wrap()
 		}
 
+		dev := a.edit.ActiveDevice()
 		spec := s.Spec
 		if !a.hasSnap {
-			spec, _ = device.BuildSpec(a.edit.Device)
+			spec, _ = device.BuildSpec(dev)
 		}
 		ui.Row(c).Gap(8).Wrap().Children(func() {
-			chip(c, device.Find(a.edit.Device.PresetID).Name)
+			chip(c, device.KindLabel(a.edit.Active))
+			chip(c, profileBrief(dev))
 			pw, ph := spec.Selected.PixelSize()
 			chip(c, fmt.Sprintf("%d×%d pt", spec.Selected.Width, spec.Selected.Height))
 			chip(c, fmt.Sprintf("%d×%d px", pw, ph))
@@ -210,17 +242,43 @@ func drawChart(p *ui.Painter, r ui.Rect, history []float64, params detector.Para
 
 func (a *app) settingsCard(c *ui.Context) {
 	card(c, "虚拟屏", func() {
-		names := make([]string, len(device.Presets))
-		for i, p := range device.Presets {
-			names[i] = p.Name
+		kind := indexOf(kindKeys, a.edit.Active)
+		ui.Field(c, "客户端设备", func() {
+			if ui.Segmented(c, &kind, kindLabels...).FillEqually().Changed() {
+				a.switchActive(kindKeys[kind])
+			}
+		}).Description("iPad 和电脑各自保存一套配置；UU 远程无法自动判断客户端类型，请按连入设备手动切换。")
+
+		dev := a.edit.ActiveDevicePtr()
+		presets := device.PresetsByKind(a.edit.Active)
+		names := make([]string, 0, len(presets)+1)
+		for _, p := range presets {
+			names = append(names, p.Name)
 		}
-		ui.Field(c, "iPad 型号", func() {
+		names = append(names, customPresetLabel)
+		presetLabel := "iPad 型号"
+		if a.edit.Active == device.KindPC {
+			presetLabel = "显示器分辨率"
+		}
+		ui.Field(c.Key(string(a.edit.Active)+"-preset"), presetLabel, func() {
 			if ui.Select(c, &a.presetName, names).Changed() {
-				for _, p := range device.Presets {
-					if p.Name == a.presetName {
-						a.edit.Device.PresetID = p.ID
-						if p.MaxHz < a.edit.Device.RefreshHz {
-							a.edit.Device.RefreshHz = p.MaxHz
+				if a.presetName == customPresetLabel {
+					if dev.CustomW <= 0 || dev.CustomH <= 0 {
+						p := device.Find(dev.PresetID)
+						dev.CustomW, dev.CustomH = p.PixelW, p.PixelH
+					}
+				} else {
+					for _, p := range presets {
+						if p.Name == a.presetName {
+							changedPreset := dev.PresetID != p.ID
+							dev.PresetID = p.ID
+							dev.CustomW, dev.CustomH = 0, 0
+							if a.edit.Active == device.KindPC && changedPreset {
+								dev.Scale = p.DefaultScale
+							}
+							if p.MaxHz < dev.RefreshHz {
+								dev.RefreshHz = p.MaxHz
+							}
 						}
 					}
 				}
@@ -228,30 +286,60 @@ func (a *app) settingsCard(c *ui.Context) {
 			}
 		})
 
+		custom := dev.CustomW > 0 && dev.CustomH > 0
+		if custom {
+			w, h := float64(dev.CustomW), float64(dev.CustomH)
+			ui.Field(c.Key(string(a.edit.Active)+"-custom"), "自定义分辨率（像素）", func() {
+				ui.Row(c).Gap(8).Children(func() {
+					ui.Column(c).Grow(1).Children(func() {
+						if ui.NumberInput(c.Key("customW"), &w, 640, 7680, 10).Changed() {
+							dev.CustomW = int(w)
+							a.apply()
+						}
+					})
+					ui.Column(c).Grow(1).Children(func() {
+						if ui.NumberInput(c.Key("customH"), &h, 480, 4320, 10).Changed() {
+							dev.CustomH = int(h)
+							a.apply()
+						}
+					})
+				})
+			}).Description("横屏像素（宽 × 高），范围 640×480 ~ 7680×4320。")
+		}
+
 		orient := 0
-		if a.edit.Device.Portrait {
+		if dev.Portrait {
 			orient = 1
 		}
 		ui.Field(c, "方向", func() {
 			if ui.Segmented(c, &orient, orientLabels...).FillEqually().Changed() {
-				a.edit.Device.Portrait = orient == 1
+				dev.Portrait = orient == 1
 				a.apply()
 			}
 		})
 
-		scale := indexOf(scaleKeys, a.edit.Device.Scale)
-		ui.Field(c, "缩放", func() {
-			if ui.Segmented(c, &scale, scaleLabels...).FillEqually().Changed() {
-				a.edit.Device.Scale = scaleKeys[scale]
+		sKeys, sLabels := scaleKeys, scaleLabels
+		sDesc := "“默认”与 iPad 本身的 Retina 比例一致；“缩小”能放下更多内容；“原生 1:1”文字会非常小。"
+		if a.edit.Active == device.KindPC {
+			sKeys, sLabels = pcScaleKeys, pcScaleLabels
+			sDesc = "100% 为原生 1:1 像素（适合 1080p / 2K 桌面屏）；125%–200% 为 HiDPI 缩放（适合高分屏或 4K）。"
+		}
+		scale := indexOf(sKeys, dev.Scale)
+		ui.Field(c.Key(string(a.edit.Active)+"-scale"), "缩放", func() {
+			if ui.Segmented(c, &scale, sLabels...).FillEqually().Changed() {
+				dev.Scale = sKeys[scale]
 				a.apply()
 			}
-		}).Description("“默认”与 iPad 本身的 Retina 比例一致；“缩小”能放下更多内容；“原生 1:1”文字会非常小。")
+		}).Description(sDesc)
 
-		hz := indexOf(hzValues, a.edit.Device.RefreshHz)
-		maxHz := device.Find(a.edit.Device.PresetID).MaxHz
+		hz := indexOf(hzValues, dev.RefreshHz)
+		maxHz := device.Find(dev.PresetID).MaxHz
+		if custom {
+			maxHz = 120
+		}
 		ui.Field(c, "刷新率", func() {
 			if ui.Segmented(c, &hz, "60 Hz", "120 Hz").FillEqually().Disabled(maxHz < 120).Changed() {
-				a.edit.Device.RefreshHz = hzValues[hz]
+				dev.RefreshHz = hzValues[hz]
 				a.apply()
 			}
 		})

@@ -177,11 +177,37 @@ func TestConfigChangeRecreates(t *testing.T) {
 	h.sample(500)
 	cfg := DefaultConfig()
 	cfg.Detect = detector.Params{ConnectKBps: 100, ConnectSeconds: 1, HoldKBps: 5, DisconnectSeconds: 3}
-	cfg.Device.Portrait = true
+	cfg.Profiles.IPad.Portrait = true
 	h.ctl.SetConfig(cfg)
 	h.settle()
 	if h.disp.creates != 2 || h.disp.last.Selected.Width != 1032 {
 		t.Fatalf("expected portrait recreate, creates=%d mode=%+v", h.disp.creates, h.disp.last.Selected)
+	}
+}
+
+func TestSwitchActiveProfileRecreates(t *testing.T) {
+	h := newHarness(t, nil)
+	h.settle()
+	h.sample(500)
+	if h.disp.creates != 1 || h.disp.last.Selected != (device.Mode{Width: 1376, Height: 1032, HiDPI: true}) {
+		t.Fatalf("initial iPad display unexpected: creates=%d mode=%+v", h.disp.creates, h.disp.last.Selected)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Detect = detector.Params{ConnectKBps: 100, ConnectSeconds: 1, HoldKBps: 5, DisconnectSeconds: 3}
+	cfg.Active = device.KindPC
+	cfg.Profiles.PC.PresetID = "pc-1440p"
+	h.ctl.SetConfig(cfg)
+	h.settle()
+	if h.disp.creates != 2 || h.disp.last.Selected != (device.Mode{Width: 2560, Height: 1440, HiDPI: false}) {
+		t.Fatalf("expected PC recreate, creates=%d mode=%+v", h.disp.creates, h.disp.last.Selected)
+	}
+
+	cfg.Active = device.KindIPad
+	h.ctl.SetConfig(cfg)
+	h.settle()
+	if h.disp.creates != 3 || h.disp.last.Selected != (device.Mode{Width: 1376, Height: 1032, HiDPI: true}) {
+		t.Fatalf("expected iPad recreate, creates=%d mode=%+v", h.disp.creates, h.disp.last.Selected)
 	}
 }
 

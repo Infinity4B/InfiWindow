@@ -14,6 +14,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"github.com/Infinity4B/infiwindow/internal/remote"
+	"github.com/Infinity4B/infiwindow/internal/remote/device"
 )
 
 func (a *app) setupTray() {
@@ -36,6 +37,26 @@ func (a *app) setupTray() {
 			a.ctl.SetConfig(a.edit)
 			a.win.Invalidate()
 		}}
+	a.trayIPad = &mygo.MenuItem{
+		Label:   "iPad 配置 · " + profileBrief(a.edit.Profiles.IPad),
+		Type:    mygo.MenuItemCheckbox,
+		Checked: a.edit.Active == device.KindIPad,
+		Click: func(*mygo.MenuItem, *mygo.Window) {
+			a.switchActive(device.KindIPad)
+			a.trayIPad.SetChecked(true)
+			a.trayPC.SetChecked(false)
+		},
+	}
+	a.trayPC = &mygo.MenuItem{
+		Label:   "电脑配置 · " + profileBrief(a.edit.Profiles.PC),
+		Type:    mygo.MenuItemCheckbox,
+		Checked: a.edit.Active == device.KindPC,
+		Click: func(*mygo.MenuItem, *mygo.Window) {
+			a.switchActive(device.KindPC)
+			a.trayIPad.SetChecked(false)
+			a.trayPC.SetChecked(true)
+		},
+	}
 	a.trayHiDPI = &mygo.MenuItem{Label: "外接屏 HiDPI…", Click: func(*mygo.MenuItem, *mygo.Window) {
 		a.page = pageHiDPI
 		a.showWindow()
@@ -44,6 +65,9 @@ func (a *app) setupTray() {
 		a.trayRemote,
 		a.trayToggle,
 		a.trayAuto,
+		mygo.Separator(),
+		a.trayIPad,
+		a.trayPC,
 		mygo.Separator(),
 		a.trayHiDPI,
 		mygo.Separator(),
@@ -70,9 +94,10 @@ func (a *app) updateTray() {
 	}
 	s := a.snap
 	title, _, _ := a.remoteStatus(&ui.Theme{})
-	status := "远程扩展屏 · " + title
+	kind := device.KindLabel(s.Config.Active)
+	status := fmt.Sprintf("远程扩展屏（%s）· %s", kind, title)
 	if s.DisplayOn {
-		status = fmt.Sprintf("远程扩展屏 · 运行中 %d×%d", s.Spec.Selected.Width, s.Spec.Selected.Height)
+		status = fmt.Sprintf("远程扩展屏（%s）· 运行中 %d×%d", kind, s.Spec.Selected.Width, s.Spec.Selected.Height)
 	}
 	a.trayRemote.SetLabel(status)
 	if s.DisplayOn {
@@ -81,9 +106,16 @@ func (a *app) updateTray() {
 		a.trayToggle.SetLabel("立即创建虚拟屏")
 	}
 	a.trayAuto.SetChecked(s.Config.Mode == remote.ModeAuto)
+	a.trayIPad.SetLabel("iPad 配置 · " + profileBrief(s.Config.Profiles.IPad))
+	a.trayPC.SetLabel("电脑配置 · " + profileBrief(s.Config.Profiles.PC))
+	a.trayIPad.SetChecked(s.Config.Active == device.KindIPad)
+	a.trayPC.SetChecked(s.Config.Active == device.KindPC)
 	if a.trayOn != s.DisplayOn || !a.trayInit {
 		a.trayOn, a.trayInit = s.DisplayOn, true
 		_ = a.tray.SetIcon(trayIcon(s.DisplayOn), true)
+	}
+	if a.trayStatus != status {
+		a.trayStatus = status
 		a.tray.SetToolTip("InfiWindow · " + status)
 	}
 }

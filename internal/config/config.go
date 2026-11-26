@@ -44,6 +44,10 @@ func Load(path string) (Config, error) {
 		return Default(), err
 	}
 	c := Default()
+	// Clear profile fields before unmarshaling so Normalize can tell whether an
+	// older file only populated the legacy "device" field without "profiles".
+	c.Remote.Active = ""
+	c.Remote.Profiles = remote.Profiles{}
 	if _, ok := probe["remote"]; !ok {
 		if _, legacy := probe["device"]; legacy {
 			err := json.Unmarshal(b, &c.Remote)

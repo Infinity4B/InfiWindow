@@ -157,6 +157,9 @@ func (c *Controller) SetConfig(cfg Config) {
 		c.cfg = cfg
 		c.machine.SetParams(cfg.Detect)
 		c.source.SetPrefixes(cfg.Processes)
+		if old.Active != cfg.Active {
+			c.logf(activity.Info, "切换客户端配置为 %s", device.KindLabel(cfg.Active))
+		}
 		if old.Mode != cfg.Mode {
 			c.logf(activity.Info, "切换为%s", c.modeText())
 		}
@@ -236,7 +239,7 @@ func (c *Controller) desired() bool {
 }
 
 func (c *Controller) reconcile() {
-	spec, err := device.BuildSpec(c.cfg.Device)
+	spec, err := device.BuildSpec(c.cfg.ActiveDevice())
 	c.snap.Spec = spec
 	c.snap.SpecErr = ""
 	if err != nil {
@@ -285,8 +288,8 @@ func (c *Controller) create(spec device.Spec) {
 		c.logf(activity.Warn, "%v", err)
 	}
 	w, h := spec.Selected.PixelSize()
-	c.logf(activity.Good, "虚拟屏已创建：%d×%d pt（%d×%d px）@%gHz，%s",
-		spec.Selected.Width, spec.Selected.Height, w, h, spec.RefreshHz, layoutText(c.cfg.Layout))
+	c.logf(activity.Good, "虚拟屏已创建（%s）：%d×%d pt（%d×%d px）@%gHz，%s",
+		device.KindLabel(c.cfg.Active), spec.Selected.Width, spec.Selected.Height, w, h, spec.RefreshHz, layoutText(c.cfg.Layout))
 }
 
 func (c *Controller) destroy() {
@@ -335,7 +338,8 @@ func layoutText(l display.Layout) string {
 
 func specEqual(a, b device.Spec) bool {
 	if a.Name != b.Name || a.Selected != b.Selected || a.RefreshHz != b.RefreshHz ||
-		a.MaxPixelW != b.MaxPixelW || a.MaxPixelH != b.MaxPixelH || len(a.Modes) != len(b.Modes) {
+		a.MaxPixelW != b.MaxPixelW || a.MaxPixelH != b.MaxPixelH ||
+		a.WidthMM != b.WidthMM || a.HeightMM != b.HeightMM || len(a.Modes) != len(b.Modes) {
 		return false
 	}
 	for i := range a.Modes {

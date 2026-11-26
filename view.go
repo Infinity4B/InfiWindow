@@ -8,6 +8,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"github.com/Infinity4B/infiwindow/internal/remote"
+	"github.com/Infinity4B/infiwindow/internal/remote/device"
 )
 
 var accent = ui.Hex("#3D7EFF")
@@ -40,7 +41,7 @@ type pageInfo struct {
 
 var pages = []pageInfo{
 	{pageOverview, "显示器", "这台 Mac 当前连接的所有显示器，以及各项功能的状态。", iconOverview},
-	{pageRemote, "远程扩展屏", "用 UU 远程从 iPad 连入时，自动加一块和 iPad 分辨率一致的虚拟屏，画面铺满不留黑边。", iconRemote},
+	{pageRemote, "远程扩展屏", "用 UU 远程从 iPad 或电脑连入时，自动加一块匹配对方分辨率的虚拟屏，画面铺满不留黑边。", iconRemote},
 	{pageHiDPI, "外接屏 HiDPI", "给 2K 等非 Retina 外接显示器加上 HiDPI 缩放档位，文字和图标更平滑。", iconHiDPI},
 	{pageLog, "活动记录", "各项功能做过的操作。", iconLog},
 	{pageSettings, "设置", "", iconSettings},
@@ -161,11 +162,14 @@ func (a *app) pageHeader(c *ui.Context, p pageInfo) {
 			}
 		})
 		if p.id == pageRemote {
-			mode := "自动模式"
-			if a.edit.Mode == remote.ModeManual {
-				mode = "手动模式"
-			}
-			ui.Badge(c, mode).Background(t.Accent.Alpha(0.12)).TextColor(t.Accent)
+			ui.Row(c).Gap(6).Children(func() {
+				ui.Badge(c, device.KindLabel(a.edit.Active)).Background(t.Surface).TextColor(t.Text)
+				mode := "自动模式"
+				if a.edit.Mode == remote.ModeManual {
+					mode = "手动模式"
+				}
+				ui.Badge(c, mode).Background(t.Accent.Alpha(0.12)).TextColor(t.Accent)
+			})
 		}
 	})
 }

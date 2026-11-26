@@ -24,8 +24,9 @@ type app struct {
 	cancel context.CancelFunc
 	log    *activity.Log
 
-	trayRemote, trayToggle, trayAuto, trayHiDPI *mygo.MenuItem
-	trayOn, trayInit                            bool
+	trayRemote, trayToggle, trayAuto, trayIPad, trayPC, trayHiDPI *mygo.MenuItem
+	trayOn, trayInit                                              bool
+	trayStatus                                                    string
 
 	quitting    bool
 	page        string

@@ -42,7 +42,7 @@ func newTestApp(page string) *app {
 	a.syncPresetName()
 	a.ctl = remote.New(a.edit, nopDisplays{}, nopSource{}, a.log, func(remote.Config) error { return nil }, func(remote.Snapshot) {})
 	a.hasSnap = true
-	a.snap = remote.Snapshot{Config: a.edit, Spec: must(device.BuildSpec(a.edit.Device))}
+	a.snap = remote.Snapshot{Config: a.edit, Spec: must(device.BuildSpec(a.edit.ActiveDevice()))}
 	a.snap.Sample.Conns = -1
 	a.displays = []display.Display{
 		{ID: 1, Width: 1512, Height: 982, PixelWidth: 3024, PixelHeight: 1964, RefreshHz: 120, Main: true, Builtin: true},
@@ -53,7 +53,7 @@ func newTestApp(page string) *app {
 }
 
 func activeSnapshot(cfg remote.Config) remote.Snapshot {
-	spec, _ := device.BuildSpec(cfg.Device)
+	spec, _ := device.BuildSpec(cfg.ActiveDevice())
 	hist := make([]float64, 0, 90)
 	for i := range 90 {
 		v := 2.0
@@ -152,7 +152,7 @@ func TestRemoteSettingsEditConfig(t *testing.T) {
 	if err := tt.Click("竖屏"); err != nil {
 		t.Fatal(err)
 	}
-	if !a.edit.Device.Portrait {
+	if !a.edit.Profiles.IPad.Portrait {
 		t.Fatal("portrait not applied")
 	}
 	if err := tt.Click("主显示器"); err != nil {
@@ -166,6 +166,37 @@ func TestRemoteSettingsEditConfig(t *testing.T) {
 	}
 	if a.edit.Mode != remote.ModeManual || !tt.HasText("手动模式") {
 		t.Fatal("manual mode not applied")
+	}
+}
+
+func TestRemoteSwitchClientProfile(t *testing.T) {
+	a := newTestApp(pageRemote)
+	tt := ui.NewTester(a.view, testW, testH)
+	expectTexts(t, tt, "客户端设备", "iPad 型号", "放大", "默认", "缩小", "原生 1:1")
+
+	if err := tt.Click("电脑"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.edit.Active != device.KindPC {
+		t.Fatalf("active = %q, want pc", a.edit.Active)
+	}
+	expectTexts(t, tt, "显示器分辨率", "1920×1080 (1080p · 16:9)", "100%", "125%", "150%", "200%")
+
+	if err := tt.Click("150%"); err != nil {
+		t.Fatal(err)
+	}
+	if a.edit.Profiles.PC.Scale != device.Scale150 {
+		t.Fatalf("pc scale = %q, want 150", a.edit.Profiles.PC.Scale)
+	}
+
+	// Switch back to iPad and verify its profile stayed independent.
+	if err := tt.Click("iPad"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.edit.Active != device.KindIPad || a.edit.Profiles.IPad.Scale != device.ScaleDefault || a.edit.Profiles.PC.Scale != device.Scale150 {
+		t.Fatalf("profiles not independent: active=%q ipad=%+v pc=%+v", a.edit.Active, a.edit.Profiles.IPad, a.edit.Profiles.PC)
 	}
 }
 
